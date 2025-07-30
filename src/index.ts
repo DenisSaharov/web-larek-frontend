@@ -1,169 +1,179 @@
 import './scss/styles.scss';
-import { AppApi } from './components/AppApi';
-import { AppView } from './components/AppView';
-import { Api } from './components/base/api';
-import { EventEmitter, IEvents } from './components/base/events';
-import { BasketData } from './components/BasketData';
-import { BasketView } from './components/BasketView';
-import { CardBasket } from './components/CardBasket';
-import { CardCatalog } from './components/CardCatalog';
-import { CardPreview } from './components/CardPreview';
-import { CardsData } from './components/CardsData';
-import { Modal } from './components/Modal';
-import { API_URL, settings } from './utils/constants';
-import { cloneTemplate } from './utils/utils';
-import { OrderForm } from './components/OrderForm';
-import { UserData } from './components/UserData';
-import { IFormView, IUserData } from './types';
-import { ContactsForm } from './components/ContactsForm';
-import { SuccessOrderView } from './components/SuccessOrderView';
 
-const events: IEvents = new EventEmitter();
-const appView = new AppView(document.querySelector('.page'), events);
-const modal = new Modal(document.querySelector('#modal-container'), events);
-const baseApi = new Api(API_URL, settings);
-const api = new AppApi(baseApi);
+import { CDN_URL, API_URL } from './utils/constants';
+import { EventEmitter } from './components/base/events';
+import { ApiModel } from './components/ModelApi';
+import { CartItem } from './components/ViewCartItem';
+import { FormModel } from './components/ModelForm';
+import { Order } from './components/ViewFormOrder';
+import { IGoodsItem } from './types';
+import { Modal } from './components/ViewModal';
+import { ensureElement } from './utils/utils';
+import { DataModel } from './components/ModelData';
+import { Card } from './components/ViewCard';
+import { CardPreview } from './components/ViewCardPreview';
+import { CartModel } from './components/ModelCart';
+import { Cart } from './components/ViewCart';
+import { Contacts } from './components/ViewFormContacts';
+import { Success } from './components/ViewSuccess';
+import { MainPage } from './components/ViewMainPage';
 
-const basketTemp: HTMLTemplateElement = document.querySelector('#basket');
-const cardPreviewTemp: HTMLTemplateElement = document.querySelector('#card-preview');
-const cardCatalogTemp: HTMLTemplateElement = document.querySelector('#card-catalog');
-const cardBasketTemp: HTMLTemplateElement = document.querySelector('#card-basket');
-const orderTemp: HTMLTemplateElement = document.querySelector('#order');
-const contactsTemp: HTMLTemplateElement = document.querySelector('#contacts');
-const successTemp: HTMLTemplateElement = document.querySelector('#success');
+class App {
+  private events = new EventEmitter();
+  private apiModel = new ApiModel(CDN_URL, API_URL);
+  private dataModel = new DataModel(this.events);
+  private cartModel = new CartModel();
+  private formModel = new FormModel(this.events);
+  private modal: Modal;
 
-const basketView = new BasketView(cloneTemplate(basketTemp),events);
-const cardPreview = new CardPreview(cloneTemplate(cardPreviewTemp), events);
-const orderForm = new OrderForm(cloneTemplate(orderTemp), events);
-const contactsForm = new ContactsForm(cloneTemplate(contactsTemp), events);
-const successView = new SuccessOrderView(cloneTemplate(successTemp), events);
+  private templates: Record<string, HTMLTemplateElement>;
 
+  private cart: Cart;
+  private order: Order;
+  private contacts: Contacts;
+  private mainPage: MainPage;
 
-const cardsData = new CardsData(events);
-const basketData = new BasketData(events);
-const userData = new UserData(events);
-
-
-//запрос на сервер
-api.getCatalog()
-    .then((cards) =>{
-        cardsData.cards = cards;
-    })
-    .catch(err => {
-        console.log('Ошибка получения товаров: ', err);
+  constructor() {
+    this.templates = this.loadTemplates({
+      cardCatalogTemplate: '#card-catalog',
+      cardPreviewTemplate: '#card-preview',
+      cartTemplate: '#basket',
+      cardCartTemplate: '#card-basket',
+      orderTemplate: '#order',
+      contactsTemplate: '#contacts',
+      successTemplate: '#success',
     });
 
+    this.modal = new Modal(ensureElement('#modal_active'), this.events);
 
-//отрисовываем карточки, пришедшие с сервера
-events.on('cards:loaded', () => {
-    const cardsArray = cardsData.cards.map((card) => {
-        const cardCatalog = new CardCatalog(cloneTemplate(cardCatalogTemp), events);
-        return cardCatalog.render(card);
+    this.cart = new Cart(this.templates.cartTemplate, this.events);
+    this.order = new Order(this.templates.orderTemplate, this.events);
+    this.contacts = new Contacts(this.templates.contactsTemplate, this.events);
+    this.mainPage = new MainPage('.page', this.events);
+
+    this.subscribeEvents();
+    this.fetchData();
+  }
+
+  private loadTemplates(selectors: Record<string, string>) {
+    return Object.fromEntries(
+      Object.entries(selectors).map(([key, sel]) => [
+        key,
+        document.querySelector(sel) as HTMLTemplateElement,
+      ]),
+    );
+  }
+
+  private subscribeEvents() {
+    this.on('productCards:receive', () => {
+      const cards = this.dataModel.itemCards.map(item => 
+        new Card(this.templates.cardCatalogTemplate, this.events, {
+          onClick: () => this.events.emit('card:select', item),
+        }).render(item)
+      );
+      this.mainPage.renderCards(cards);
     });
-    appView.render({catalog: cardsArray});
-}) 
 
+    this.on('card:select', (item: IGoodsItem) => this.dataModel.setPreview(item));
 
-//открытие карточки в превью
-events.on('card:select', ({cardId}: {cardId: string})=> {
-    const card = cardsData.getCard(cardId);
-    modal.content = cardPreview.render({...card, checkBasket: basketData.inBasket(card.id)});
-    modal.open();
-});
-
-
-//открытие корзины с главной страницы
-events.on('basket:open', () => {
-    modal.content = basketView.render();
-    modal.open();
-});
-
-
-//кнопка Купить в превью карточки
-events.on('card:add', ({cardId}: {cardId: string}) => {
-    const card = cardsData.getCard(cardId);
-    basketData.addCard(card);
-    modal.close();
-});
-
-//изменения в корзине
-events.on('basket:changed', () => {
-    const cards = basketData.cards.map((card, index) => {
-        const cardBasket = new CardBasket(cloneTemplate(cardBasketTemp), events);
-        return cardBasket.render({...card, cardIndex: index + 1});
+    this.on('modalCard:open', (item) => {
+      const preview = new CardPreview(this.templates.cardPreviewTemplate, this.events);
+      this.modal.content = preview.render(item);
+      this.modal.render();
     });
-    appView.countInBasket = basketData.getCount();
-    modal.content = basketView.render({cards: cards, totalPrice: basketData.getTotalPrice()});
-})
 
-//обработчик удаления карточки из корзины
-events.on('card:delete', ({cardId}: {cardId: string}) => {
-    basketData.deleteCard(cardId);
-});
+    this.on('card:addBasket', () => {
+      this.cartModel.addItem(this.dataModel.selectedCard);
+      this.mainPage.renderHeaderCartCounter(this.cartModel.getItemsCount());
+      this.modal.close();
+    });
 
+    this.on('basket:basketItemRemove', (item) => {
+      this.cartModel.removeItem(item);
+      this.mainPage.renderHeaderCartCounter(this.cartModel.getItemsCount());
+      this.cart.renderTotalAllGoods(this.cartModel.getTotalPrice());
+      this.renderCartItems();
+    });
 
-//поведение скролла при открытии и закрытии модального окна
-events.on('modal:scrolled', ({isLocked}: {isLocked: boolean}) => {
-    appView.scroll = isLocked;
-});
+    this.on('basket:open', () => {
+      this.cart.renderTotalAllGoods(this.cartModel.getTotalPrice());
+      this.renderCartItems();
+      this.modal.content = this.cart.render();
+      this.modal.render();
+    });
 
+    this.on('order:open', () => {
+      this.modal.content = this.order.render();
+      this.modal.render();
+    });
 
-//кнопка Оформить в корзине
-events.on('basket:to_Order', () => {
-    modal.content = orderForm.render();
-    userData.orderValidation();
-});
+    this.on('order:paymentSelection', (button) => {
+      this.formModel.payment = button.name;
+    });
 
+    this.on('order:changeAddress', ({ field, value }) => {
+      this.formModel.setOrderAddress(field, value);
+    });
 
-//изменение данных в ордер форме
-events.on('order:change', (data: {field: keyof IUserData, value: string}) => {
-    userData.setUserData(data.field, data.value);
-    userData.orderValidation();
-});
+    this.on('formErrors:address', (errors) => {
+      const { address, payment } = errors;
+      this.order.valid = !address && !payment;
+      this.order.formErrors.textContent = [address, payment].filter(Boolean).join('; ');
+    });
 
+    this.on('contacts:open', () => {
+      this.modal.content = this.contacts.render();
+      this.modal.render();
+    });
 
-//рендер при изменении данных ордер формы 
-events.on('order:data_changed', (data: IUserData & IFormView) => {
-	orderForm.render(data);
-});
+    this.on('contacts:changeInput', ({ field, value }) => {
+      this.formModel.setOrderData(field, value);
+    });
 
+    this.on('formErrors:change', (errors) => {
+      const { email, phone } = errors;
+      this.contacts.valid = !email && !phone;
+      this.contacts.formErrors.textContent = [phone, email].filter(Boolean).join('; ');
+    });
 
-//нажали Далее в ордер форме
-events.on('order:submit', () => {
-	modal.content = contactsForm.render();	
-	userData.contactsValidation();
-});
+    this.on('success:open', () => {
+      const itemIds = this.cartModel.items.map(item => item.id);
+      const totalPrice = this.cartModel.getTotalPrice();
 
-
-//изменение данных в форме контактов
-events.on('contacts:change', (data: {field: keyof IUserData, value: string}) => {
-    userData.setUserData(data.field, data.value);
-    userData.contactsValidation();
-});
-
-
-//рендер при изменении данных формы контактов
-events.on('contacts:data_changed', (data: IUserData & IFormView) => {
-	contactsForm.render(data);
-});
-
-
-//нажали Оплатить в форме контактов
-events.on('contacts:submit', () => {
-	api.postUserData(basketData.cards, userData.getUserData(), basketData.getTotalPrice())
-        .then(data => {
-            userData.clearData();
-            basketData.clearBasket();
-            successView.totalPrice = data.total;
-            modal.content = successView.render();
+      this.apiModel.postOrder(this.formModel.getOrderedItem(itemIds, totalPrice))
+        .then(() => {
+          const successInstance = new Success(this.templates.successTemplate, this.events);
+          this.modal.content = successInstance.render(totalPrice);
+          this.cartModel.clear();
+          this.mainPage.renderHeaderCartCounter(this.cartModel.getItemsCount());
+          this.modal.render();
         })
-        .catch((err) => {
-            console.log('Сбой отправки заказа: ', err);
-        }); 
-});
+        .catch(console.log);
+    });
 
+    this.on('success:close', () => this.modal.close());
 
-//нажали кнопку За новыми покупками
-events.on('success:submit', () => {
-    modal.close();
-});
+    this.on('modal:open', () => this.modal.locked = true);
+    this.on('modal:close', () => this.modal.locked = false);
+  }
+
+  private renderCartItems() {
+    this.cart.items = this.cartModel.items.map((item, i) => 
+      new CartItem(this.templates.cardCartTemplate, this.events, {
+        onClick: () => this.events.emit('basket:basketItemRemove', item),
+      }).render(item, i + 1)
+    );
+  }
+
+  private on(event: string, handler: (...args: any[]) => void) {
+    this.events.on(event, handler);
+  }
+
+  private fetchData() {
+    this.apiModel.fetchItems()
+      .then(data => this.dataModel.itemCards = data)
+      .catch(console.log);
+  }
+}
+
+new App();
